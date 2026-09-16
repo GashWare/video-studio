@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest & IDE cache
+.pytest_cache/
+.vs/
+*.pyproj
+*.slnx
+.vscode/
+.idea/
+
+# Application logs and crash dumps
+*.log
+app.log
+crash_reports/
+*.tmp
+
+# Temporary project autosaves and media artifacts
+.autosave.nleproj
+*.nleproj
+test_audio_temp.wav
+test_img_temp.png
+
+# Environment and OS files
+.env
+.DS_Store
+Thumbs.db

@@ -1,0 +1,8 @@
+{
+    "geometry": "1920x989+56+15",
+    "theme": "Dark",
+    "accent_color": "blue",
+    "log_level": "INFO",
+    "export_quality": 85,
+    "show_console": true
+}

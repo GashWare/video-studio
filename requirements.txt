@@ -1,0 +1,22 @@
+# Core Requirements
+customtkinter>=5.2.0
+Pillow>=10.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+opencv-python>=4.8.0
+moviepy>=1.0.3
+imageio>=2.30.0
+tkinterdnd2>=0.3.0
+proglog>=0.1.10
+
+# Testing
+pytest>=8.0.0
+
+# Optional AI & DSP Features
+# openai-whisper        # Auto-subtitling
+# scenedetect[opencv]   # AI Scene detection
+# mediapipe             # AI Smart reframe (face tracking)
+# librosa               # AI Beat & transient detection
+# noisereduce           # AI Spectral noise reduction
+# pedalboard            # VST3 / AU audio plugin hosting
+# rembg                 # AI background removal
