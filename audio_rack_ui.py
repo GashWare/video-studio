@@ -129,7 +129,7 @@ class AudioRackDialog(ctk.CTkToplevel):
 
     def _build_ui(self):
         # ── Top Bar ──────────────────────────────────────────────────
-        top_bar = ctk.CTkFrame(self, fg_color="#1f232b", height=48, corner_radius=0)
+        top_bar = ctk.CTkFrame(self, fg_color="#1f232b", height=52, corner_radius=0)
         top_bar.pack(fill="x", side="top", padx=0, pady=0)
 
         # Target Selector
@@ -145,17 +145,17 @@ class AudioRackDialog(ctk.CTkToplevel):
         self._target_var = ctk.StringVar(value=current_val)
         self._target_cmb = ctk.CTkComboBox(
             top_bar, variable=self._target_var, values=track_opts,
-            command=self._on_target_change, width=160
+            command=self._on_target_change, width=170, height=32, font=("Segoe UI", 11, "bold")
         )
         self._target_cmb.pack(side="left", padx=4, pady=8)
 
         # Preset Selector
-        ctk.CTkLabel(top_bar, text="Preset:", font=("Segoe UI", 12)).pack(side="left", padx=(16, 6), pady=8)
+        ctk.CTkLabel(top_bar, text="Preset:", font=("Segoe UI", 12, "bold")).pack(side="left", padx=(16, 6), pady=8)
         self._preset_var = ctk.StringVar(value="-- Select Preset --")
         self._preset_cmb = ctk.CTkComboBox(
             top_bar, variable=self._preset_var,
             values=["-- Select Preset --"] + list(PRESETS.keys()),
-            command=self._apply_preset, width=220
+            command=self._apply_preset, width=230, height=32, font=("Segoe UI", 11)
         )
         self._preset_cmb.pack(side="left", padx=4, pady=8)
 
@@ -163,7 +163,7 @@ class AudioRackDialog(ctk.CTkToplevel):
         self._bypass_all_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
             top_bar, text="Bypass All", variable=self._bypass_all_var,
-            command=self._toggle_bypass_all, width=90
+            command=self._toggle_bypass_all, width=100, font=("Segoe UI", 11, "bold")
         ).pack(side="right", padx=12, pady=8)
 
         # ── Main Content Split ───────────────────────────────────────
@@ -171,13 +171,13 @@ class AudioRackDialog(ctk.CTkToplevel):
         content.pack(fill="both", expand=True, padx=8, pady=8)
 
         # Left Column: Effects Chain List
-        left_pane = ctk.CTkFrame(content, width=280, fg_color="#242831", corner_radius=6)
+        left_pane = ctk.CTkFrame(content, width=290, fg_color="#242831", corner_radius=6)
         left_pane.pack(side="left", fill="both", padx=(0, 6), pady=0)
         left_pane.pack_propagate(False)
 
         chain_header = ctk.CTkFrame(left_pane, fg_color="transparent")
         chain_header.pack(fill="x", padx=8, pady=(8, 4))
-        ctk.CTkLabel(chain_header, text="INSERT EFFECTS", font=("Segoe UI", 11, "bold"), text_color="#00d2be").pack(side="left")
+        ctk.CTkLabel(chain_header, text="INSERT EFFECTS", font=("Segoe UI", 12, "bold"), text_color="#00d2be").pack(side="left")
 
         # Effect Actions Toolbar
         add_bar = ctk.CTkFrame(left_pane, fg_color="transparent")
@@ -197,12 +197,12 @@ class AudioRackDialog(ctk.CTkToplevel):
         ]
         ctk.CTkComboBox(
             add_bar, variable=self._add_var, values=add_opts,
-            command=self._on_add_effect_selected, width=170
+            command=self._on_add_effect_selected, width=170, height=32, font=("Segoe UI", 10, "bold")
         ).pack(side="left", padx=(0, 4))
 
-        ctk.CTkButton(add_bar, text="▲", width=28, height=28, command=lambda: self._move_effect(-1)).pack(side="left", padx=2)
-        ctk.CTkButton(add_bar, text="▼", width=28, height=28, command=lambda: self._move_effect(1)).pack(side="left", padx=2)
-        ctk.CTkButton(add_bar, text="✕", width=28, height=28, fg_color="#7a2020", command=self._delete_selected_effect).pack(side="left", padx=2)
+        ctk.CTkButton(add_bar, text="▲", width=32, height=32, font=("Segoe UI", 11, "bold"), command=lambda: self._move_effect(-1)).pack(side="left", padx=2)
+        ctk.CTkButton(add_bar, text="▼", width=32, height=32, font=("Segoe UI", 11, "bold"), command=lambda: self._move_effect(1)).pack(side="left", padx=2)
+        ctk.CTkButton(add_bar, text="✕", width=32, height=32, font=("Segoe UI", 11, "bold"), fg_color="#7a2020", command=self._delete_selected_effect).pack(side="left", padx=2)
 
         # Scrollable Chain List
         self._chain_scroll = ctk.CTkScrollableFrame(left_pane, label_text="")
@@ -395,9 +395,9 @@ class AudioRackDialog(ctk.CTkToplevel):
     def _add_slider(self, parent, label: str, val: float, min_v: float, max_v: float, unit: str, on_change_fn):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=4)
-        ctk.CTkLabel(row, text=label, width=130, anchor="w").pack(side="left")
+        ctk.CTkLabel(row, text=label, width=130, anchor="w", font=("Segoe UI", 11, "bold")).pack(side="left")
 
-        val_lbl = ctk.CTkLabel(row, text=f"{val:.1f} {unit}", width=60, anchor="e")
+        val_lbl = ctk.CTkLabel(row, text=f"{val:.1f} {unit}", width=65, anchor="e", font=("Consolas", 11, "bold"))
         val_lbl.pack(side="right", padx=(4, 0))
 
         def _on_move(v):
@@ -406,7 +406,7 @@ class AudioRackDialog(ctk.CTkToplevel):
             on_change_fn(v_float)
             self._sync_back()
 
-        slider = ctk.CTkSlider(row, from_=min_v, to=max_v, command=_on_move)
+        slider = ctk.CTkSlider(row, from_=min_v, to=max_v, height=18, command=_on_move)
         slider.set(val)
         slider.pack(side="left", fill="x", expand=True, padx=6)
 

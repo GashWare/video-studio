@@ -176,13 +176,13 @@ class VideoScopesWindow(ctk.CTkToplevel):
         self.update_scope()
 
     def _build_ui(self):
-        tb = ctk.CTkFrame(self, fg_color="#1a1c24", height=40)
+        tb = ctk.CTkFrame(self, fg_color="#1a1c24", height=48)
         tb.pack(fill="x", padx=8, pady=(8, 4))
 
-        ctk.CTkLabel(tb, text="Scope Mode:", font=ctk.CTkFont(size=12, weight="bold")).pack(side="left", padx=(10, 6))
+        ctk.CTkLabel(tb, text="Scope Mode:", font=ctk.CTkFont(family="Segoe UI", size=12, weight="bold")).pack(side="left", padx=(12, 8))
 
         modes = ["RGB Parade", "Luma Waveform", "Vectorscope", "Histogram", "All Quad-View"]
-        seg = ctk.CTkSegmentedButton(tb, values=modes, variable=self._scope_type, command=lambda v: self.update_scope())
+        seg = ctk.CTkSegmentedButton(tb, values=modes, variable=self._scope_type, font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"), height=32, command=lambda v: self.update_scope())
         seg.pack(side="left", padx=6, pady=6)
 
         self._canvas_lbl = ctk.CTkLabel(self, text="", fg_color="#0d0e12", corner_radius=6)

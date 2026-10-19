@@ -4,6 +4,8 @@
 [![Python: 3.10+](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)](https://www.python.org/)
 [![Tests: Passing](https://img.shields.io/badge/Tests-118%20Passing-success.svg)](tests/)
 
+![Video Studio Workspace](assets/screenshot.png)
+
 **Video Studio** is a lightweight, high-performance, enterprise-grade Non-Linear Video Editor (NLE) and Digital Audio Workstation (DAW) built with Python, CustomTkinter, NumPy, SciPy, OpenCV, and MoviePy.
 
 Designed for professional creators, editors, and audio engineers, Video Studio combines real-time video scoping, 3D LUT color grading, precision timeline trimming, DAW-style audio mixing with VST3 hosting, and modern AI automation.

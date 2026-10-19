@@ -1,6 +1,15 @@
 import tkinter as tk
 import os
 import math
+import threading
+import collections
+
+try:
+    import cv2
+    from PIL import Image, ImageTk
+    _HAS_CV2_PIL = True
+except ImportError:
+    _HAS_CV2_PIL = False
 
 from waveform import waveform_cache
 
@@ -13,10 +22,119 @@ except ImportError:
 # Zoom presets: pixels per second (supports zooming out to fit long sequences)
 _ZOOM_LEVELS = [0.2, 0.5, 1.0, 2.0, 3.5, 5.0, 8.0, 12.0, 18.0, 25.0, 40.0, 60.0, 90.0, 140.0, 200.0, 300.0, 500.0]
 _ZOOM_DEFAULT_IDX = 9          # 25.0 px/s
-_TRACK_LABEL_W = 210           # width of the track-label gutter (fits FL Studio knobs)
+_TRACK_LABEL_W = 240           # width of the track-label gutter (fits large FL Studio knobs)
 
 # Resize handle hit zone (pixels from clip edge)
-_RESIZE_HIT = 8
+_RESIZE_HIT = 14
+
+
+# ---------------------------------------------------------------------------
+# Periodic Timeline Video Thumbnail Cache
+# ---------------------------------------------------------------------------
+class TimelineThumbnailCache:
+    """
+    Extracts and caches periodic thumbnail frames for video clips in the timeline.
+    Uses background worker thread to extract frames via OpenCV without blocking the UI.
+    """
+    def __init__(self, max_cache: int = 500):
+        self._cache = collections.OrderedDict()      # (path, t_key, w, h) -> ImageTk.PhotoImage
+        self._pil_cache = collections.OrderedDict()  # (path, t_key) -> PIL.Image
+        self._pending = set()
+        self._lock = threading.Lock()
+        self._max_cache = max_cache
+        self._queue = collections.deque()
+        self._worker_running = False
+
+    def get(self, path: str, t: float, width_px: int, height_px: int, callback=None):
+        if not _HAS_CV2_PIL or not path or not os.path.isfile(path):
+            return None
+        if width_px <= 4 or height_px <= 4:
+            return None
+
+        t_key = round(max(0.0, float(t)), 1)
+        w_key = max(10, int(width_px))
+        h_key = max(10, int(height_px))
+        key = (path, t_key, w_key, h_key)
+
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+                return self._cache[key]
+
+            # Check if base PIL image is already cached
+            base_key = (path, t_key)
+            if base_key in self._pil_cache:
+                pil_im = self._pil_cache[base_key]
+                try:
+                    resized = pil_im.resize((w_key, h_key), Image.Resampling.BILINEAR)
+                    photo = ImageTk.PhotoImage(resized)
+                    self._cache[key] = photo
+                    if len(self._cache) > self._max_cache:
+                        self._cache.popitem(last=False)
+                    return photo
+                except Exception:
+                    pass
+
+            # Queue background extraction
+            if base_key not in self._pending:
+                self._pending.add(base_key)
+                self._queue.append((path, t_key, w_key, h_key, callback))
+                if not self._worker_running:
+                    self._worker_running = True
+                    threading.Thread(target=self._worker, daemon=True).start()
+
+        return None
+
+    def _worker(self):
+        while True:
+            with self._lock:
+                if not self._queue:
+                    self._worker_running = False
+                    break
+                path, t_key, w_key, h_key, callback = self._queue.popleft()
+
+            pil_im = None
+            try:
+                cap = cv2.VideoCapture(path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+                    frame_idx = int(t_key * fps)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                    ret, frame = cap.read()
+                    if not ret:
+                        cap.set(cv2.CAP_PROP_POS_MSEC, t_key * 1000.0)
+                        ret, frame = cap.read()
+                    cap.release()
+
+                    if ret and frame is not None and frame.size > 0:
+                        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        pil_im = Image.fromarray(rgb)
+            except Exception:
+                pil_im = None
+
+            with self._lock:
+                self._pending.discard((path, t_key))
+                if pil_im is not None:
+                    self._pil_cache[(path, t_key)] = pil_im
+                    if len(self._pil_cache) > self._max_cache:
+                        self._pil_cache.popitem(last=False)
+
+            if callback and pil_im is not None:
+                try:
+                    callback(path)
+                except Exception:
+                    pass
+
+    def clear(self):
+        with self._lock:
+            self._cache.clear()
+            self._pil_cache.clear()
+            self._pending.clear()
+            self._queue.clear()
+
+
+timeline_thumb_cache = TimelineThumbnailCache()
+
 
 # Visual track themes for clear track-by-track distinction
 _TRACK_THEMES = {
@@ -157,11 +275,11 @@ def _draw_fl_knob(
     - Label and formatted value readout
     """
     # 1. Background arc ring (from 225 deg down clockwise 270 deg to -45 deg)
-    r_track = radius + 2.5
+    r_track = radius + 3.0
     canvas.create_arc(
         cx - r_track, cy - r_track, cx + r_track, cy + r_track,
         start=225, extent=-270, style='arc',
-        outline="#282c37", width=3, tags="static"
+        outline="#282c37", width=3.5, tags="static"
     )
 
     # 2. Active arc
@@ -174,10 +292,10 @@ def _draw_fl_knob(
             canvas.create_arc(
                 cx - r_track, cy - r_track, cx + r_track, cy + r_track,
                 start=90, extent=extent, style='arc',
-                outline=accent_color, width=3, tags="static"
+                outline=accent_color, width=3.5, tags="static"
             )
         # Center detent mark at 12 o'clock
-        canvas.create_line(cx, cy - r_track - 2, cx, cy - r_track + 1, fill="#555a68", width=1, tags="static")
+        canvas.create_line(cx, cy - r_track - 2, cx, cy - r_track + 2, fill="#555a68", width=1.5, tags="static")
         angle_deg = 90.0 - p * 135.0
     else:
         # Unipolar: 0.0 to 2.0 (default 1.0).
@@ -187,7 +305,7 @@ def _draw_fl_knob(
             canvas.create_arc(
                 cx - r_track, cy - r_track, cx + r_track, cy + r_track,
                 start=225, extent=extent, style='arc',
-                outline=accent_color, width=3, tags="static"
+                outline=accent_color, width=3.5, tags="static"
             )
         # Default marker tick (100% / 12 o'clock)
         def_frac = (default_val - min_val) / max(0.001, max_val - min_val)
@@ -196,7 +314,7 @@ def _draw_fl_knob(
         canvas.create_line(
             cx + (r_track - 1) * math.cos(def_rad), cy - (r_track - 1) * math.sin(def_rad),
             cx + (r_track + 3) * math.cos(def_rad), cy - (r_track + 3) * math.sin(def_rad),
-            fill="#555a68", width=1, tags="static"
+            fill="#555a68", width=1.5, tags="static"
         )
         angle_deg = 225.0 - frac * 270.0
 
@@ -204,7 +322,7 @@ def _draw_fl_knob(
     r_body = radius - 0.5
     canvas.create_oval(
         cx - r_body, cy - r_body, cx + r_body, cy + r_body,
-        fill="#1a1c24", outline="#353b4c", width=1, tags="static"
+        fill="#1a1c24", outline="#3d4456", width=1.5, tags="static"
     )
 
     # 4. Pointer Notch (radiating outward)
@@ -213,28 +331,31 @@ def _draw_fl_knob(
     sin_a = math.sin(rad)
     canvas.create_line(
         cx + 2.0 * cos_a, cy - 2.0 * sin_a,
-        cx + (r_body - 1.5) * cos_a, cy - (r_body - 1.5) * sin_a,
-        fill="#ffffff", width=2, tags="static"
+        cx + (r_body - 1.0) * cos_a, cy - (r_body - 1.0) * sin_a,
+        fill="#ffffff", width=2.5, tags="static"
     )
 
     # 5. Label and value readout below/beside knob
     if is_bipolar:
         pan_str = "C" if abs(val_clamped) < 0.05 else (f"L{int(abs(val_clamped)*100)}" if val_clamped < 0 else f"R{int(val_clamped*100)}")
         readout_txt = pan_str
-        readout_col = "#ffb347" if abs(val_clamped) >= 0.05 else "#888899"
+        readout_col = "#ffb347" if abs(val_clamped) >= 0.05 else "#9ca3af"
+    elif label == "SPD":
+        readout_txt = f"{val_clamped:.2f}x"
+        readout_col = "#c084fc" if abs(val_clamped - 1.0) > 0.02 else "#9ca3af"
     else:
         readout_txt = f"{int(val_clamped * 100)}%"
-        readout_col = "#00d2be" if abs(val_clamped - 1.0) > 0.02 else "#888899"
+        readout_col = "#00d2be" if abs(val_clamped - 1.0) > 0.02 else "#9ca3af"
 
     # Top readout text
     canvas.create_text(
-        cx, cy - radius - 5, text=readout_txt,
-        fill=readout_col, font=("Segoe UI", 6, "bold"), tags="static"
+        cx, cy - radius - 6, text=readout_txt,
+        fill=readout_col, font=("Segoe UI", 8, "bold"), tags="static"
     )
-    # Bottom Label (VOL or PAN)
+    # Bottom Label (VOL, PAN, or SPD)
     canvas.create_text(
-        cx, cy + radius + 6, text=label,
-        fill="#757c91", font=("Segoe UI", 6, "bold"), tags="static"
+        cx, cy + radius + 7, text=label,
+        fill="#8a92a6", font=("Segoe UI", 8, "bold"), tags="static"
     )
 
 
@@ -253,7 +374,7 @@ class MultiTrackTimeline(tk.Frame):
     B1-Drag clip body    : move clip (snaps to 0.1 s grid)
     B1-Release           : commit move/trim → rebuild proxy
     Right-click clip     : context menu (Split, Duplicate, Separate Audio, Link, Label, Delete)
-    Right-click gutter   : track mixer settings (Volume, Pan, Mute, Solo, Delete Track)
+    Right-click gutter   : track mixer settings (Volume, Pan, Speed, Mute, Solo, Delete Track)
     +  /  -  buttons     : zoom via toolbar
     + Video / + Audio    : add timeline tracks
     Horizontal scrollbar : pan timeline
@@ -265,12 +386,13 @@ class MultiTrackTimeline(tk.Frame):
         self.app = app
         self.tracks     = ['V2 (Overlay)', 'V1 (Main)', 'A1 (Audio 1)', 'A2 (Audio 2)']
         self.track_keys = ['V2', 'V1', 'A1', 'A2']
-        self.track_h    = 56
-        self.ruler_h    = 28
+        self.track_h    = 68
+        self.ruler_h    = 32
 
-        # Track mixer controls: volume (0.0 to 2.0, default 1.0) and stereo pan (-1.0 to 1.0, default 0.0)
+        # Track mixer controls: volume (0.0 to 2.0, default 1.0), stereo pan (-1.0 to 1.0, default 0.0), speed (0.25 to 4.0, default 1.0)
         self.track_volumes = {k: 1.0 for k in self.track_keys}
         self.track_pans    = {k: 0.0 for k in self.track_keys}
+        self.track_speeds  = {k: 1.0 for k in self.track_keys}
 
         # Zoom state
         self._zoom_idx  = _ZOOM_DEFAULT_IDX
@@ -313,70 +435,94 @@ class MultiTrackTimeline(tk.Frame):
         self.work_in      = 0.0  # render work area start
         self.work_out     = None # render work area end (None = full sequence)
 
+        # Video thumbnail cache and image references
+        self.thumb_cache  = timeline_thumb_cache
+        self._thumb_refs  = []
+        self._thumb_redraw_pending = False
+
         self._mute_btns   = {}
         self._solo_btns   = {}
         self._sm_frame    = None
 
         self._build_ui()
 
+    def _on_thumb_ready(self, path):
+        """Thread-safe notification that background thumbnail extraction completed."""
+        try:
+            self.after_idle(self._flush_thumb_redraw)
+        except Exception:
+            pass
+
+    def _flush_thumb_redraw(self):
+        if not getattr(self, '_thumb_redraw_pending', False):
+            self._thumb_redraw_pending = True
+            def _do():
+                self._thumb_redraw_pending = False
+                self._needs_full_redraw = True
+                self.draw()
+            try:
+                self.after(60, _do)
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
         # ── Toolbar ──────────────────────────────────────────────────
-        tb = tk.Frame(self, bg="#111111", height=28)
+        tb = tk.Frame(self, bg="#111111", height=36)
         tb.pack(side="top", fill="x")
         tb.pack_propagate(False)
 
-        tk.Label(tb, text="Timeline", bg="#111111", fg="#aaaaaa",
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=8)
+        tk.Label(tb, text="Timeline", bg="#111111", fg="#cccccc",
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=(10, 8))
 
-        tk.Button(tb, text="−", bg="#222222", fg="white", relief="flat",
-                  width=2, command=self._zoom_out,
-                  activebackground="#333333", activeforeground="white"
-                  ).pack(side="left", padx=(4, 0))
+        tk.Button(tb, text="−", bg="#252830", fg="white", relief="flat",
+                  width=3, font=("Segoe UI", 10, "bold"), command=self._zoom_out,
+                  activebackground="#3b4252", activeforeground="white"
+                  ).pack(side="left", padx=(2, 0), pady=4)
         self._zoom_lbl = tk.Label(tb, text=self._zoom_label(), bg="#111111",
-                                  fg="#aaaaaa", width=7, font=("Segoe UI", 8))
-        self._zoom_lbl.pack(side="left")
-        tk.Button(tb, text="+", bg="#222222", fg="white", relief="flat",
-                  width=2, command=self._zoom_in,
-                  activebackground="#333333", activeforeground="white"
-                  ).pack(side="left", padx=(0, 8))
+                                  fg="#cccccc", width=8, font=("Segoe UI", 9, "bold"))
+        self._zoom_lbl.pack(side="left", pady=4)
+        tk.Button(tb, text="+", bg="#252830", fg="white", relief="flat",
+                  width=3, font=("Segoe UI", 10, "bold"), command=self._zoom_in,
+                  activebackground="#3b4252", activeforeground="white"
+                  ).pack(side="left", padx=(0, 6), pady=4)
 
-        tk.Button(tb, text="⟨⟨ Reset Zoom", bg="#222222", fg="#aaaaaa",
-                  relief="flat", font=("Segoe UI", 8),
+        tk.Button(tb, text="⟨⟨ Reset Zoom", bg="#252830", fg="#dddddd",
+                  relief="flat", font=("Segoe UI", 9, "bold"),
                   command=self._zoom_reset,
-                  activebackground="#333333", activeforeground="white"
-                  ).pack(side="left", padx=4)
+                  activebackground="#3b4252", activeforeground="white"
+                  ).pack(side="left", padx=4, pady=4)
 
         # ── Track Add Buttons ─────────────────────────────────────────
         tk.Button(tb, text="+ Video", bg="#1b4f72", fg="#ebf5fb",
-                  relief="flat", font=("Segoe UI", 8, "bold"),
+                  relief="flat", font=("Segoe UI", 9, "bold"),
                   command=self.add_video_track,
                   activebackground="#2874a6", activeforeground="white"
-                  ).pack(side="left", padx=(8, 2))
+                  ).pack(side="left", padx=(8, 2), pady=4)
 
         tk.Button(tb, text="+ Audio", bg="#145a32", fg="#eafaf1",
-                  relief="flat", font=("Segoe UI", 8, "bold"),
+                  relief="flat", font=("Segoe UI", 9, "bold"),
                   command=self.add_audio_track,
                   activebackground="#1e8449", activeforeground="white"
-                  ).pack(side="left", padx=(2, 2))
+                  ).pack(side="left", padx=(2, 2), pady=4)
 
         tk.Button(tb, text="+ Subtitle", bg="#7d6608", fg="#fef9e7",
-                  relief="flat", font=("Segoe UI", 8, "bold"),
+                  relief="flat", font=("Segoe UI", 9, "bold"),
                   command=self.add_subtitle_track,
                   activebackground="#9a7d0a", activeforeground="white"
-                  ).pack(side="left", padx=(2, 2))
+                  ).pack(side="left", padx=(2, 2), pady=4)
 
         tk.Button(tb, text="+ Image", bg="#880e4f", fg="#fce4ec",
-                  relief="flat", font=("Segoe UI", 8, "bold"),
+                  relief="flat", font=("Segoe UI", 9, "bold"),
                   command=self.add_image_track,
                   activebackground="#ad1457", activeforeground="white"
-                  ).pack(side="left", padx=(2, 8))
+                  ).pack(side="left", padx=(2, 8), pady=4)
 
         # ── Solo/Mute buttons per track (dynamic) ──────────────────────
         self._sm_frame = tk.Frame(tb, bg="#111111")
-        self._sm_frame.pack(side="left", padx=(4, 4))
+        self._sm_frame.pack(side="left", padx=(6, 4))
         self._rebuild_solo_mute_toolbar()
 
         # ── Canvas ───────────────────────────────────────────────────
@@ -417,24 +563,24 @@ class MultiTrackTimeline(tk.Frame):
 
         for tk_key in self.track_keys:
             col_frame = tk.Frame(self._sm_frame, bg="#111111")
-            col_frame.pack(side="left", padx=1)
+            col_frame.pack(side="left", padx=2)
 
-            lbl = tk.Label(col_frame, text=tk_key, bg="#111111", fg="#777777",
-                           font=("Segoe UI", 7), width=3)
+            lbl = tk.Label(col_frame, text=tk_key, bg="#111111", fg="#8892a0",
+                           font=("Segoe UI", 8, "bold"), width=3)
             lbl.pack(side="top")
 
             btn_row = tk.Frame(col_frame, bg="#111111")
             btn_row.pack(side="top")
 
-            m_btn = tk.Button(btn_row, text="M", bg="#222222", fg="#aaaaaa",
-                              relief="flat", width=2, font=("Segoe UI", 7),
-                              activebackground="#333333", activeforeground="white",
+            m_btn = tk.Button(btn_row, text="M", bg="#252830", fg="#aaaaaa",
+                              relief="flat", width=2, font=("Segoe UI", 8, "bold"),
+                              activebackground="#3b4252", activeforeground="white",
                               command=lambda k=tk_key: self.toggle_mute(k))
             m_btn.pack(side="left", padx=1)
 
-            s_btn = tk.Button(btn_row, text="S", bg="#222222", fg="#aaaaaa",
-                              relief="flat", width=2, font=("Segoe UI", 7),
-                              activebackground="#333333", activeforeground="white",
+            s_btn = tk.Button(btn_row, text="S", bg="#252830", fg="#aaaaaa",
+                              relief="flat", width=2, font=("Segoe UI", 8, "bold"),
+                              activebackground="#3b4252", activeforeground="white",
                               command=lambda k=tk_key: self.toggle_solo(k))
             s_btn.pack(side="left", padx=1)
 
@@ -503,10 +649,22 @@ class MultiTrackTimeline(tk.Frame):
     # ------------------------------------------------------------------
     # Scroll helpers
     # ------------------------------------------------------------------
+    def get_effective_clip_duration(self, clip: dict) -> float:
+        """Return the rendered timeline duration of a clip accounting for clip speed and track speed."""
+        trk = clip.get('track', 'V1')
+        trk_spd = self.track_speeds.get(trk, 1.0)
+        clip_spd = float(clip.get('speed', 1.0) or 1.0)
+        eff_spd = trk_spd * clip_spd
+        if eff_spd <= 0:
+            eff_spd = 1.0
+        trim_in = float(clip.get('trim_in', 0.0))
+        trim_out = float(clip.get('trim_out', 3.0))
+        return max(0.01, (trim_out - trim_in) / eff_spd)
+
     def _max_scroll(self):
         if not self.app.project_clips:
             return 0
-        max_t = max(c['start'] + (c['trim_out'] - c['trim_in'])
+        max_t = max(c['start'] + self.get_effective_clip_duration(c)
                     for c in self.app.project_clips)
         content_w = _TRACK_LABEL_W + max_t * self.px_per_sec + 200
         visible_w = self.canvas.winfo_width()
@@ -543,13 +701,15 @@ class MultiTrackTimeline(tk.Frame):
         hit = self._hit_test_knob(event.x, event.y)
         if hit:
             tk_key, knob_type, _, _ = hit
-            step = 0.05 * delta
             if knob_type == 'vol':
                 curr = self.track_volumes.get(tk_key, 1.0)
-                self.set_track_volume(tk_key, round(curr + step, 2))
-            else:
+                self.set_track_volume(tk_key, round(curr + 0.05 * delta, 2))
+            elif knob_type == 'pan':
                 curr = self.track_pans.get(tk_key, 0.0)
-                self.set_track_pan(tk_key, round(curr + step, 2))
+                self.set_track_pan(tk_key, round(curr + 0.05 * delta, 2))
+            elif knob_type == 'spd':
+                curr = self.track_speeds.get(tk_key, 1.0)
+                self.set_track_speed(tk_key, round(curr + 0.05 * delta, 2))
             return
 
         if event.state & 0x0004:   # Ctrl held → zoom
@@ -567,8 +727,10 @@ class MultiTrackTimeline(tk.Frame):
             tk_key, knob_type, _, _ = hit
             if knob_type == 'vol':
                 self.set_track_volume(tk_key, 1.0)
-            else:
+            elif knob_type == 'pan':
                 self.set_track_pan(tk_key, 0.0)
+            elif knob_type == 'spd':
+                self.set_track_speed(tk_key, 1.0)
 
     # ------------------------------------------------------------------
     # Configure (resize)
@@ -653,6 +815,7 @@ class MultiTrackTimeline(tk.Frame):
         self.tracks.insert(0, tk_name)
         self.track_volumes[tk_key] = 1.0
         self.track_pans[tk_key]    = 0.0
+        self.track_speeds[tk_key]  = 1.0
         self.track_muted[tk_key]   = False
         self.track_solo[tk_key]    = False
 
@@ -674,6 +837,7 @@ class MultiTrackTimeline(tk.Frame):
         self.tracks.append(tk_name)
         self.track_volumes[tk_key] = 1.0
         self.track_pans[tk_key]    = 0.0
+        self.track_speeds[tk_key]  = 1.0
         self.track_muted[tk_key]   = False
         self.track_solo[tk_key]    = False
 
@@ -696,6 +860,7 @@ class MultiTrackTimeline(tk.Frame):
         self.tracks.insert(0, tk_name)
         self.track_volumes[tk_key] = 1.0
         self.track_pans[tk_key]    = 0.0
+        self.track_speeds[tk_key]  = 1.0
         self.track_muted[tk_key]   = False
         self.track_solo[tk_key]    = False
 
@@ -724,6 +889,7 @@ class MultiTrackTimeline(tk.Frame):
         self.tracks.insert(ins_idx, tk_name)
         self.track_volumes[tk_key] = 1.0
         self.track_pans[tk_key]    = 0.0
+        self.track_speeds[tk_key]  = 1.0
         self.track_muted[tk_key]   = False
         self.track_solo[tk_key]    = False
 
@@ -750,6 +916,7 @@ class MultiTrackTimeline(tk.Frame):
         self.tracks.pop(idx)
         self.track_volumes.pop(track_key, None)
         self.track_pans.pop(track_key, None)
+        self.track_speeds.pop(track_key, None)
         self.track_muted.pop(track_key, None)
         self.track_solo.pop(track_key, None)
 
@@ -777,6 +944,13 @@ class MultiTrackTimeline(tk.Frame):
         self.draw()
         self.app.rebuild_proxy_cache()
 
+    def set_track_speed(self, track_key: str, spd: float):
+        """Set track speed multiplier (0.25 to 4.0)."""
+        self.track_speeds[track_key] = max(0.25, min(float(spd), 4.0))
+        self._needs_full_redraw = True
+        self.draw()
+        self.app.rebuild_proxy_cache()
+
     def toggle_mute(self, track_key: str):
         self.track_muted[track_key] = not self.track_muted.get(track_key, False)
         self._update_solo_mute_buttons()
@@ -796,20 +970,23 @@ class MultiTrackTimeline(tk.Frame):
         return [k for k, v in self.track_muted.items() if not v]
 
     def _hit_test_knob(self, x: float, y: float):
-        """Hit test for FL Studio volume and pan rotary knobs in the gutter."""
+        """Hit test for FL Studio volume, pan, and speed rotary knobs in the gutter."""
         if x > _TRACK_LABEL_W:
             return None
         trk_idx = int(y // self.track_h)
         if 0 <= trk_idx < len(self.track_keys):
             tk_key = self.track_keys[trk_idx]
             y0 = trk_idx * self.track_h
-            cy = y0 + 36
-            # Vol knob center cx=52, cy=y0+36, hit radius 16
-            if (x - 52) ** 2 + (y - cy) ** 2 <= 16 ** 2:
-                return (tk_key, 'vol', 52, cy)
-            # Pan knob center cx=142, cy=y0+36, hit radius 16
-            if (x - 142) ** 2 + (y - cy) ** 2 <= 16 ** 2:
-                return (tk_key, 'pan', 142, cy)
+            cy = y0 + 44
+            # Vol knob center cx=46, cy=y0+44, hit radius 16
+            if (x - 46) ** 2 + (y - cy) ** 2 <= 16 ** 2:
+                return (tk_key, 'vol', 46, cy)
+            # Pan knob center cx=116, cy=y0+44, hit radius 16
+            if (x - 116) ** 2 + (y - cy) ** 2 <= 16 ** 2:
+                return (tk_key, 'pan', 116, cy)
+            # Speed knob center cx=186, cy=y0+44, hit radius 16
+            if (x - 186) ** 2 + (y - cy) ** 2 <= 16 ** 2:
+                return (tk_key, 'spd', 186, cy)
         return None
 
     # ------------------------------------------------------------------
@@ -818,6 +995,7 @@ class MultiTrackTimeline(tk.Frame):
     def draw(self, event=None):
         c = self.canvas
         c.delete("all")
+        self._thumb_refs = []
         w = c.winfo_width()
         h = c.winfo_height()
         if w <= 1 or h <= 1:
@@ -850,7 +1028,7 @@ class MultiTrackTimeline(tk.Frame):
                                 fill="#15161a", outline="", tags="static")
 
             # Left vertical signature accent bar
-            c.create_rectangle(0, y, 4, y + self.track_h,
+            c.create_rectangle(0, y, 5, y + self.track_h,
                                 fill=theme['accent'], outline="", tags="static")
 
             # Gutter divider
@@ -858,43 +1036,49 @@ class MultiTrackTimeline(tk.Frame):
                           fill="#38383e", tags="static")
 
             # Track badge [V1], [A1], etc.
-            c.create_rectangle(8, y + 8, 36, y + 26,
+            c.create_rectangle(8, y + 7, 44, y + 27,
                                 fill=theme['badge_bg'], outline=theme['accent'],
                                 width=1, tags="static")
-            c.create_text(22, y + 17, text=tk_key,
-                          fill=theme['badge_fg'], font=("Segoe UI", 7, "bold"),
+            c.create_text(26, y + 17, text=tk_key,
+                          fill=theme['badge_fg'], font=("Segoe UI", 8, "bold"),
                           tags="static")
 
             # Track label text
-            c.create_text(42, y + 17,
+            c.create_text(52, y + 17,
                           text=trk_name, anchor="w",
-                          fill="#e4e4e7", font=("Segoe UI", 8, "bold"),
+                          fill="#e4e4e7", font=("Segoe UI", 9, "bold"),
                           tags="static")
 
-            # FL Studio style Volume & Panning Rotary Knobs
+            # FL Studio style Volume, Panning, and Speed Rotary Knobs
             vol_val = self.track_volumes.get(tk_key, 1.0)
             pan_val = self.track_pans.get(tk_key, 0.0)
+            spd_val = self.track_speeds.get(tk_key, 1.0)
             _draw_fl_knob(
-                canvas=c, cx=52, cy=y + 36, radius=8.5,
+                canvas=c, cx=46, cy=y + 44, radius=10.0,
                 value=vol_val, min_val=0.0, max_val=2.0, default_val=1.0,
                 is_bipolar=False, label="VOL", accent_color="#00d2be"
             )
             _draw_fl_knob(
-                canvas=c, cx=142, cy=y + 36, radius=8.5,
+                canvas=c, cx=116, cy=y + 44, radius=10.0,
                 value=pan_val, min_val=-1.0, max_val=1.0, default_val=0.0,
                 is_bipolar=True, label="PAN", accent_color="#ff9900"
             )
+            _draw_fl_knob(
+                canvas=c, cx=186, cy=y + 44, radius=10.0,
+                value=spd_val, min_val=0.25, max_val=4.0, default_val=1.0,
+                is_bipolar=False, label="SPD", accent_color="#a855f7"
+            )
 
             # Delete track button [×] on far right of gutter
-            c.create_text(_TRACK_LABEL_W - 12, y + 17, text="✕",
-                          fill="#777777", activefill="#e74c3c", font=("Segoe UI", 8, "bold"),
+            c.create_text(_TRACK_LABEL_W - 14, y + 17, text="✕",
+                          fill="#777777", activefill="#e74c3c", font=("Segoe UI", 10, "bold"),
                           tags="static")
 
             # Mute / Solo badges in gutter
             if is_muted and not any_solo:
-                c.create_text(_TRACK_LABEL_W - 26, y + 17,
+                c.create_text(_TRACK_LABEL_W - 32, y + 17,
                               text="M", anchor="e",
-                              fill="#e74c3c", font=("Segoe UI", 7, "bold"),
+                              fill="#e74c3c", font=("Segoe UI", 8, "bold"),
                               tags="static")
             if is_solo:
                 c.create_rectangle(_TRACK_LABEL_W, y, _TRACK_LABEL_W + 3,
@@ -911,7 +1095,7 @@ class MultiTrackTimeline(tk.Frame):
                 trk_idx = self.track_keys.index(clip['track'])
             except ValueError:
                 continue
-            duration = clip['trim_out'] - clip['trim_in']
+            duration = self.get_effective_clip_duration(clip)
             x1 = self._time_to_x(clip['start'])
             x2 = self._time_to_x(clip['start'] + duration)
             if x2 < _TRACK_LABEL_W or x1 > w:
@@ -943,16 +1127,55 @@ class MultiTrackTimeline(tk.Frame):
             outline_col = "#ffffff" if is_sel else theme['accent']
             outline_w   = 2 if is_sel else 1
 
-            # Clip body
+            # Clip body base
             c.create_rectangle(x1, y1, x2, y2,
                                 fill=fill_col,
                                 outline=outline_col,
                                 width=outline_w,
                                 tags="static")
-            # Top highlight stripe
-            c.create_rectangle(x1, y1, x2, y1 + 3,
-                                fill="#555555" if not is_sel else "#888888",
-                                outline="", tags="static")
+
+            clip_pix_w = x2 - x1
+            clip_pix_h = y2 - y1
+
+            # ── Periodic Video Thumbnails Filmstrip ──
+            is_video = (trk_key.startswith('V') or clip.get('path', '').lower().endswith(('.mp4', '.mov', '.avi', '.mkv', '.webm', '.m4v', '.wmv'))) and clip.get('path') and not clip.get('path') == '__title__' and os.path.isfile(clip.get('path', ''))
+            if is_video and _HAS_CV2_PIL and clip_pix_w > 10:
+                tile_w = max(55, min(100, int(clip_pix_h * 1.5)))
+                num_tiles = max(1, int(clip_pix_w / tile_w))
+                tin  = float(clip.get('trim_in', 0.0))
+                tout = float(clip.get('trim_out', tin + 1.0))
+
+                for t_idx in range(num_tiles):
+                    tx1 = x1 + t_idx * tile_w
+                    tx2 = min(x2, tx1 + tile_w)
+                    if tx2 <= _TRACK_LABEL_W or tx1 >= w:
+                        continue
+                    actual_x1 = max(tx1, _TRACK_LABEL_W)
+                    actual_w  = int(tx2 - actual_x1)
+                    actual_h  = int(clip_pix_h)
+                    if actual_w <= 4 or actual_h <= 4:
+                        continue
+
+                    t_norm  = (t_idx + 0.5) / num_tiles
+                    t_media = tin + t_norm * max(0.01, tout - tin)
+                    photo   = self.thumb_cache.get(clip['path'], t_media, actual_w, actual_h, callback=self._on_thumb_ready)
+                    if photo:
+                        c.create_image(actual_x1, y1, image=photo, anchor="nw", tags="static")
+                        self._thumb_refs.append(photo)
+
+                    # Filmstrip vertical frame divider
+                    if t_idx > 0 and tx1 > _TRACK_LABEL_W:
+                        c.create_line(tx1, y1, tx1, y2, fill="#18181b", width=1.5, tags="static")
+
+                # Semi-transparent dark header banner across top of video clip for readable title & timecode
+                header_h = min(22, max(16, clip_pix_h // 2))
+                c.create_rectangle(x1, y1, x2, y1 + header_h, fill="#0d1117", outline="", tags="static")
+                c.create_line(x1, y1 + header_h, x2, y1 + header_h, fill="#21262d", width=1, tags="static")
+            else:
+                # Top highlight stripe
+                c.create_rectangle(x1, y1, x2, y1 + 3,
+                                    fill="#555555" if not is_sel else "#888888",
+                                    outline="", tags="static")
 
             # ── Audio waveform ──
             if 'A' in clip.get('track', ''):
@@ -960,13 +1183,25 @@ class MultiTrackTimeline(tk.Frame):
                 wf = waveform_cache.get(
                     clip['path'],
                     width_px,
-                    callback=lambda p: self.draw(),
+                    callback=lambda p: self.after_idle(self.draw),
                 )
                 if wf is not None:
                     waveform_cache.draw_waveform(
                         c, wf, x1, y1, x2, y2,
                         color=theme['wf_color'], tag="waveform",
                     )
+
+            # ── Resize / Trim Grab Handles ──
+            handle_w = 6
+            c.create_rectangle(x1, y1, x1 + handle_w, y2,
+                                fill="#ffffff" if is_sel else theme['accent'],
+                                outline="", tags="static")
+            c.create_line(x1 + 3, y1 + 10, x1 + 3, y2 - 10, fill="#000000" if is_sel else "#ffffff", width=1.5, tags="static")
+
+            c.create_rectangle(x2 - handle_w, y1, x2, y2,
+                                fill="#ffffff" if is_sel else theme['accent'],
+                                outline="", tags="static")
+            c.create_line(x2 - 3, y1 + 10, x2 - 3, y2 - 10, fill="#000000" if is_sel else "#ffffff", width=1.5, tags="static")
 
             # Clip label (truncated to fit)
             trk_key = clip.get('track', 'V1')
@@ -982,30 +1217,35 @@ class MultiTrackTimeline(tk.Frame):
                 disp_name = '🎬 ' + os.path.basename(clip.get('path', 'Video'))
 
             pix_w   = x2 - x1
-            max_ch  = max(0, int(pix_w / 6) - 2)
+            max_ch  = max(0, int(pix_w / 7) - 3)
             disp    = (disp_name[:max_ch - 1] + "…") if len(disp_name) > max_ch and max_ch > 3 else disp_name
-            if pix_w > 20:
-                c.create_text(x1 + 6, y1 + (self.track_h - 8) // 2,
+            label_y = y1 + 10 if is_video else y1 + (self.track_h - 8) // 2
+            if pix_w > 24:
+                c.create_text(x1 + 10, label_y,
                               text=disp, anchor="w",
-                              fill="white", font=("Segoe UI", 8),
+                              fill="white", font=("Segoe UI", 9, "bold"),
                               tags="static")
 
             # Linked clip 🔗 badge
             if clip.get('linked_clip_id'):
                 if pix_w > 40:
-                    badge_x = x2 - 14
+                    badge_x = x2 - 18
                     badge_y = y1 + 10
                     c.create_text(badge_x, badge_y, text="🔗",
-                                  fill="#f1c40f", font=("Segoe UI", 8, "bold"),
+                                  fill="#f1c40f", font=("Segoe UI", 9, "bold"),
                                   tags="static")
 
             # Duration badge
-            dur_txt = f"{duration:.1f}s"
-            if pix_w > 65:
-                c.create_text(x2 - (24 if clip.get('linked_clip_id') else 4),
-                              y1 + (self.track_h - 8) // 2,
+            trk_spd = self.track_speeds.get(trk_key, 1.0)
+            clip_spd = float(clip.get('speed', 1.0) or 1.0)
+            eff_spd = trk_spd * clip_spd
+            dur_txt = f"{duration:.1f}s ({eff_spd:.2f}x)" if abs(eff_spd - 1.0) > 0.02 else f"{duration:.1f}s"
+            if pix_w > 75:
+                dur_y = y1 + 10 if is_video else y1 + (self.track_h - 8) // 2
+                c.create_text(x2 - (32 if clip.get('linked_clip_id') else 10),
+                              dur_y,
                               text=dur_txt, anchor="e",
-                              fill="#aaaaaa", font=("Segoe UI", 7),
+                              fill="#dddddd", font=("Segoe UI", 8, "bold"),
                               tags="static")
 
             # Mute/solo state line at bottom of clip
@@ -1025,7 +1265,7 @@ class MultiTrackTimeline(tk.Frame):
                 c.create_line(mx, 0, mx, tracks_h, fill=mc, dash=(2, 3), width=1)
                 if marker.get('label'):
                     c.create_text(mx+12, 6, text=marker['label'][:12],
-                                  anchor='w', fill=mc, font=('Segoe UI', 7))
+                                  anchor='w', fill=mc, font=('Segoe UI', 8, 'bold'))
 
         # ── Ruler ──────────────────────────────────────────────────
         ruler_y = tracks_h
@@ -1057,7 +1297,7 @@ class MultiTrackTimeline(tk.Frame):
             if x > w:
                 break
             if x >= _TRACK_LABEL_W:
-                c.create_line(x, ruler_y + self.ruler_h - 5,
+                c.create_line(x, ruler_y + self.ruler_h - 6,
                               x, ruler_y + self.ruler_h,
                               fill="#555555", tags="static")
             t += minor_s
@@ -1069,7 +1309,7 @@ class MultiTrackTimeline(tk.Frame):
                 break
             if x >= _TRACK_LABEL_W:
                 c.create_line(x, ruler_y, x, ruler_y + self.ruler_h,
-                              fill="#666666", tags="static")
+                              fill="#777777", tags="static")
                 mins, secs = divmod(t, 60)
                 hours, mins = divmod(mins, 60)
                 if hours >= 1:
@@ -1078,9 +1318,9 @@ class MultiTrackTimeline(tk.Frame):
                     lbl = f"{int(mins)}:{secs:04.1f}" if minor_s < 1 else f"{int(mins)}:{int(secs):02d}"
                 else:
                     lbl = f"{secs:.1f}s"
-                c.create_text(x + 3, ruler_y + 10,
+                c.create_text(x + 4, ruler_y + 11,
                               text=lbl, anchor="w",
-                              fill="#999999", font=("Segoe UI", 7),
+                              fill="#aaaaaa", font=("Segoe UI", 8, "bold"),
                               tags="static")
             t += major_s
 
@@ -1122,7 +1362,7 @@ class MultiTrackTimeline(tk.Frame):
                 trk_idx = self.track_keys.index(clip['track'])
             except ValueError:
                 continue
-            duration = clip['trim_out'] - clip['trim_in']
+            duration = self.get_effective_clip_duration(clip)
             x1  = self._time_to_x(clip['start'])
             x2  = self._time_to_x(clip['start'] + duration)
             y1  = trk_idx * self.track_h + 4
@@ -1156,7 +1396,13 @@ class MultiTrackTimeline(tk.Frame):
             hit = self._hit_test_knob(event.x, event.y)
             if hit:
                 tk_key, knob_type, _, _ = hit
-                cur_val = self.track_volumes.get(tk_key, 1.0) if knob_type == 'vol' else self.track_pans.get(tk_key, 0.0)
+                if knob_type == 'vol':
+                    cur_val = self.track_volumes.get(tk_key, 1.0)
+                elif knob_type == 'pan':
+                    cur_val = self.track_pans.get(tk_key, 0.0)
+                else:
+                    cur_val = self.track_speeds.get(tk_key, 1.0)
+
                 self._knob_drag = {
                     'key': tk_key,
                     'type': knob_type,
@@ -1194,7 +1440,7 @@ class MultiTrackTimeline(tk.Frame):
                 trk_idx = self.track_keys.index(clip['track'])
             except ValueError:
                 continue
-            dur  = clip['trim_out'] - clip['trim_in']
+            dur  = self.get_effective_clip_duration(clip)
             x1   = self._time_to_x(clip['start'])
             x2   = self._time_to_x(clip['start'] + dur)
             y1   = trk_idx * self.track_h + 4
@@ -1214,7 +1460,7 @@ class MultiTrackTimeline(tk.Frame):
         clip_id = clicked_clip['id']
 
         # Click on 🔗 link badge
-        dur = clicked_clip['trim_out'] - clicked_clip['trim_in']
+        dur = self.get_effective_clip_duration(clicked_clip)
         clip_x2 = self._time_to_x(clicked_clip['start'] + dur)
         clip_y1 = self.track_keys.index(clicked_clip['track']) * self.track_h + 4
         if clicked_clip.get('linked_clip_id') and (clip_x2 - 22 <= event.x <= clip_x2) and (clip_y1 <= event.y <= clip_y1 + 18):
@@ -1272,12 +1518,18 @@ class MultiTrackTimeline(tk.Frame):
                 # Range 0.0 to 2.0 (sensitivity: 0.01 per pixel)
                 new_val = max(0.0, min(2.0, start_val + dy * 0.01))
                 self.track_volumes[tk_key] = round(new_val, 2)
-            else:
+            elif knob_type == 'pan':
                 # Range -1.0 to 1.0 (sensitivity: 0.01 per pixel)
                 new_val = max(-1.0, min(1.0, start_val + dy * 0.01))
                 if abs(new_val) < 0.03:  # Subtle center snap detent
                     new_val = 0.0
                 self.track_pans[tk_key] = round(new_val, 2)
+            elif knob_type == 'spd':
+                # Range 0.25 to 4.0 (sensitivity: 0.015 per pixel)
+                new_val = max(0.25, min(4.0, start_val + dy * 0.015))
+                if abs(new_val - 1.0) < 0.04:  # Subtle 1.00x snap detent
+                    new_val = 1.0
+                self.track_speeds[tk_key] = round(new_val, 2)
 
             self._needs_full_redraw = True
             self.draw()
@@ -1286,11 +1538,15 @@ class MultiTrackTimeline(tk.Frame):
         # ── Resize drag ───────────────────────────────────────────
         if self._resize_drag["active"] and self._resize_drag["id"]:
             dx = event.x - self._resize_drag["start_x"]
-            dt = dx / self.px_per_sec
 
             for clip in self.app.project_clips:
                 if clip['id'] != self._resize_drag["id"]:
                     continue
+
+                eff_spd = float(clip.get('speed', 1.0) or 1.0) * self.track_speeds.get(clip.get('track', 'V1'), 1.0)
+                if eff_spd <= 0:
+                    eff_spd = 1.0
+                dt = (dx / self.px_per_sec) * eff_spd
 
                 orig_in  = self._resize_drag["orig_trim_in"]
                 orig_out = self._resize_drag["orig_trim_out"]
@@ -1299,7 +1555,7 @@ class MultiTrackTimeline(tk.Frame):
                 if self._resize_mode == "trim_in":
                     raw_in  = orig_in + dt
                     new_in  = round(max(0.0, min(raw_in, orig_out - 0.1)) * 10) / 10
-                    delta   = new_in - orig_in
+                    delta   = (new_in - orig_in) / eff_spd
                     clip['trim_in'] = new_in
                     clip['start']   = round(max(0.0, orig_st + delta) * 10) / 10
 
@@ -1341,7 +1597,7 @@ class MultiTrackTimeline(tk.Frame):
             for clip in self.app.project_clips:
                 if clip['id'] != self._drag["id"]:
                     snap_times.append(clip['start'])
-                    snap_times.append(clip['start'] + (clip['trim_out'] - clip['trim_in']))
+                    snap_times.append(clip['start'] + self.get_effective_clip_duration(clip))
 
             snap_thresh_t = _SNAP_THRESH_PX / self.px_per_sec
             raw = self._drag["orig_start"] + (event.x - self._drag["start_x"]) / self.px_per_sec
@@ -1374,8 +1630,8 @@ class MultiTrackTimeline(tk.Frame):
                             break
                 break
 
-        self._needs_full_redraw = True
-        self.draw()
+            self._needs_full_redraw = True
+            self.draw()
 
     def _on_release(self, event):
         # ── Knob release ──────────────────────────────────────────
@@ -1452,7 +1708,7 @@ class MultiTrackTimeline(tk.Frame):
                 trk_idx = self.track_keys.index(clip['track'])
             except ValueError:
                 continue
-            dur = clip['trim_out'] - clip['trim_in']
+            dur = self.get_effective_clip_duration(clip)
             x1  = self._time_to_x(clip['start'])
             x2  = self._time_to_x(clip['start'] + dur)
             y1  = trk_idx * self.track_h + 4
@@ -1503,6 +1759,9 @@ class MultiTrackTimeline(tk.Frame):
                          command=lambda: self.app.split_clip_at_playhead(target_id))
         menu.add_command(label="⧉ Duplicate",
                          command=lambda: self.app.duplicate_clip(target_id))
+        if hasattr(self.app, "open_crop_tool") and not target_clip.get('track', '').startswith('A'):
+            menu.add_command(label="📐 Crop & Aspect Ratio…",
+                             command=self.app.open_crop_tool)
 
         # Audio FX Rack
         if hasattr(self.app, "open_audio_rack"):
@@ -1566,12 +1825,13 @@ class MultiTrackTimeline(tk.Frame):
             menu.grab_release()
 
     def _show_track_menu(self, event, tk_key: str):
-        """Display track mixer context menu for adjusting volume, pan, mute, solo, adding, and deleting."""
+        """Display track mixer context menu for adjusting volume, pan, speed, mute, solo, adding, and deleting."""
         menu = tk.Menu(self, tearoff=0, bg="#2b2b2b", fg="white",
                        activebackground="#3a7ebf", activeforeground="white",
                        bd=0, relief="flat")
         curr_vol = self.track_volumes.get(tk_key, 1.0)
         curr_pan = self.track_pans.get(tk_key, 0.0)
+        curr_spd = self.track_speeds.get(tk_key, 1.0)
         pan_str = "Center" if abs(curr_pan) < 0.05 else (f"Left {int(abs(curr_pan)*100)}%" if curr_pan < 0 else f"Right {int(curr_pan*100)}%")
 
         menu.add_command(label=f"Track: {tk_key}", state="disabled")
@@ -1606,6 +1866,25 @@ class MultiTrackTimeline(tk.Frame):
                 command=lambda p=p_val: self.set_track_pan(tk_key, p)
             )
         menu.add_cascade(label=f"🎛 Panning ({pan_str})", menu=pan_menu)
+
+        # Speed submenu
+        spd_menu = tk.Menu(menu, tearoff=0, bg="#2b2b2b", fg="white",
+                           activebackground="#3a7ebf", activeforeground="white", bd=0, relief="flat")
+        for s_val, s_lbl in [
+            (0.25, "0.25× (Quarter Speed)"),
+            (0.5,  "0.50× (Half Speed)"),
+            (0.75, "0.75× (Slow)"),
+            (1.0,  "1.00× (Normal Speed)"),
+            (1.25, "1.25× (1.25×)"),
+            (1.5,  "1.50× (1.5× Fast)"),
+            (2.0,  "2.00× (2× Double Speed)"),
+            (4.0,  "4.00× (4× Quad Speed)"),
+        ]:
+            spd_menu.add_command(
+                label=s_lbl + ("  ✓" if abs(curr_spd - s_val) < 0.02 else ""),
+                command=lambda s=s_val: self.set_track_speed(tk_key, s)
+            )
+        menu.add_cascade(label=f"⏩ Speed ({curr_spd:.2f}×)", menu=spd_menu)
 
         menu.add_separator()
         menu.add_command(label="🔇 Toggle Mute" + (" (Muted)" if self.track_muted.get(tk_key) else ""),

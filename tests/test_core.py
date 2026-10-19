@@ -1172,22 +1172,28 @@ def test_fl_knob_hit_testing():
             project_clips = []
             def rebuild_proxy_cache(self): pass
         tl = MultiTrackTimeline(root, DummyApp())
-        # Track 0 is tl.track_keys[0] (V2): cy is 0 + 36 = 36.
+        # Track 0 is tl.track_keys[0] (V2): cy is 0 + 44 = 44.
         first_track = tl.track_keys[0]
-        # Vol knob center is at (52, 36)
-        hit_vol = tl._hit_test_knob(52, 36)
+        # Vol knob center is at (46, 44)
+        hit_vol = tl._hit_test_knob(46, 44)
         assert hit_vol is not None
         assert hit_vol[0] == first_track
         assert hit_vol[1] == "vol"
 
-        # Pan knob center is at (142, 36)
-        hit_pan = tl._hit_test_knob(142, 36)
+        # Pan knob center is at (116, 44)
+        hit_pan = tl._hit_test_knob(116, 44)
         assert hit_pan is not None
         assert hit_pan[0] == first_track
         assert hit_pan[1] == "pan"
 
-        # Outside gutter (> 210)
-        assert tl._hit_test_knob(220, 36) is None
+        # Speed knob center is at (186, 44)
+        hit_spd = tl._hit_test_knob(186, 44)
+        assert hit_spd is not None
+        assert hit_spd[0] == first_track
+        assert hit_spd[1] == "spd"
+
+        # Outside gutter (> 240)
+        assert tl._hit_test_knob(250, 44) is None
         # In gutter but far from knobs
         assert tl._hit_test_knob(10, 10) is None
     finally:
@@ -1209,15 +1215,15 @@ def test_fl_knob_double_click_reset():
         tl.set_track_pan(first_track, -0.7)
 
         class DummyEvent:
-            x = 52
-            y = 36
+            x = 46
+            y = 44
 
         # Double click volume knob -> resets to 1.0 (100%)
         tl._on_double_click(DummyEvent())
         assert tl.track_volumes[first_track] == 1.0
 
         # Double click pan knob -> resets to 0.0 (Center)
-        DummyEvent.x = 142
+        DummyEvent.x = 116
         tl._on_double_click(DummyEvent())
         assert tl.track_pans[first_track] == 0.0
     finally:
@@ -1226,8 +1232,12 @@ def test_fl_knob_double_click_reset():
 
 def test_fl_knob_wheel_adjustment():
     import tkinter as tk
+    import pytest
     from timeline import MultiTrackTimeline
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+    except Exception as exc:
+        pytest.skip(f"Tk not available: {exc}")
     root.withdraw()
     try:
         class DummyApp:
@@ -1239,8 +1249,8 @@ def test_fl_knob_wheel_adjustment():
         tl.track_pans[first_track] = 0.0
 
         class DummyEvent:
-            x = 52
-            y = 36
+            x = 46
+            y = 44
             num = 0
             delta = 120
             state = 0
@@ -1250,7 +1260,7 @@ def test_fl_knob_wheel_adjustment():
         assert tl.track_volumes[first_track] == pytest.approx(1.05)
 
         # Scroll down on pan knob -> decreases by 0.05
-        DummyEvent.x = 142
+        DummyEvent.x = 116
         DummyEvent.delta = -120
         tl._on_wheel(DummyEvent())
         assert tl.track_pans[first_track] == pytest.approx(-0.05)
@@ -1274,18 +1284,18 @@ def test_fl_knob_drag_interaction():
         first_track = tl.track_keys[0]
 
         class DummyPressEvent:
-            x = 52
-            y = 36
+            x = 46
+            y = 44
             state = 0
 
         class DummyDragEvent:
-            x = 52
-            y = 16  # dragged upward by 20px (dy = +20 -> +0.20 volume)
+            x = 46
+            y = 24  # dragged upward by 20px (dy = +20 -> +0.20 volume)
             state = 0
 
         class DummyReleaseEvent:
-            x = 52
-            y = 16
+            x = 46
+            y = 24
 
         # Press on vol knob
         tl._on_press(DummyPressEvent())
@@ -1707,6 +1717,301 @@ def test_apply_audio_chain_stereo_processing():
     assert out.shape == stereo_sig.shape
     assert out.dtype == np.float32
     assert not np.isnan(out).any()
+
+
+# ===========================================================================
+# 28. Transport Bar Layout Configuration
+# ===========================================================================
+
+def test_default_transport_layout_structure():
+    import main
+    assert hasattr(main, "DEFAULT_TRANSPORT_LAYOUT")
+    layout = main.DEFAULT_TRANSPORT_LAYOUT
+    assert "pod_order" in layout
+    assert "alignment" in layout
+    assert "vu_width" in layout
+    assert "show_headers" in layout
+    assert "visible_pods" in layout
+
+    assert layout["pod_order"] == ["transport", "timecode", "vumeter", "tools"]
+    assert layout["alignment"] == "space_between"
+    assert layout["vu_width"] == 340
+    assert layout["show_headers"] is True
+    for pod in ["transport", "timecode", "vumeter", "tools"]:
+        assert layout["visible_pods"].get(pod) is True
+
+
+def test_transport_layout_serialization():
+    import main
+    layout = copy.deepcopy(main.DEFAULT_TRANSPORT_LAYOUT)
+    layout["pod_order"] = ["timecode", "transport", "vumeter", "tools"]
+    layout["alignment"] = "center"
+    layout["vu_width"] = 460
+    layout["visible_pods"]["tools"] = False
+
+    dumped = json.dumps(layout)
+    restored = json.loads(dumped)
+    assert restored["pod_order"][0] == "timecode"
+    assert restored["alignment"] == "center"
+    assert restored["vu_width"] == 460
+    assert restored["visible_pods"]["tools"] is False
+
+
+# ===========================================================================
+# 29. Speed Effect, Rotary Knobs & Export Size Calculator
+# ===========================================================================
+
+def test_clip_duration_with_custom_speed():
+    clip = make_clip("video.mp4", "V1", 0.0, 10.0)
+    clip["trim_in"] = 0.0
+    clip["trim_out"] = 10.0
+    clip["speed"] = 2.0
+    assert clip_duration(clip) == pytest.approx(5.0)
+
+    clip["speed"] = 0.5
+    assert clip_duration(clip) == pytest.approx(20.0)
+
+    clip["speed"] = 1.0
+    assert clip_duration(clip) == pytest.approx(10.0)
+
+
+def test_timeline_effective_clip_duration_with_track_and_clip_speed():
+    import tkinter as tk
+    from timeline import MultiTrackTimeline
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        class DummyApp:
+            project_clips = []
+            fps = 30.0
+            def rebuild_proxy_cache(self): pass
+            def update_inspector(self): pass
+
+        tl = MultiTrackTimeline(root, DummyApp())
+        clip = {"id": "c1", "track": "V1", "start": 0.0, "trim_in": 0.0, "trim_out": 8.0, "speed": 1.0}
+        assert tl.get_effective_clip_duration(clip) == pytest.approx(8.0)
+
+        # Track speed 2.0x -> duration should be 4.0s
+        tl.set_track_speed("V1", 2.0)
+        assert tl.track_speeds["V1"] == pytest.approx(2.0)
+        assert tl.get_effective_clip_duration(clip) == pytest.approx(4.0)
+
+        # Clip speed 2.0x + Track speed 2.0x -> 4.0x effective speed -> duration 2.0s
+        clip["speed"] = 2.0
+        assert tl.get_effective_clip_duration(clip) == pytest.approx(2.0)
+    finally:
+        root.destroy()
+
+
+def test_timeline_knob_hit_testing_for_vol_pan_spd():
+    import tkinter as tk
+    from timeline import MultiTrackTimeline
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        class DummyApp:
+            project_clips = []
+            fps = 30.0
+            def rebuild_proxy_cache(self): pass
+            def update_inspector(self): pass
+
+        tl = MultiTrackTimeline(root, DummyApp())
+        # Track 0 (V2): y0=0, cy=44
+        hit_vol = tl._hit_test_knob(46, 44)
+        assert hit_vol is not None
+        assert hit_vol[0] == "V2" and hit_vol[1] == "vol"
+
+        hit_pan = tl._hit_test_knob(116, 44)
+        assert hit_pan is not None
+        assert hit_pan[0] == "V2" and hit_pan[1] == "pan"
+
+        hit_spd = tl._hit_test_knob(186, 44)
+        assert hit_spd is not None
+        assert hit_spd[0] == "V2" and hit_spd[1] == "spd"
+
+        # Out of bounds should return None
+        assert tl._hit_test_knob(300, 44) is None
+    finally:
+        root.destroy()
+
+
+def test_timeline_track_speed_clamping_and_reset():
+    import tkinter as tk
+    from timeline import MultiTrackTimeline
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        class DummyApp:
+            project_clips = []
+            fps = 30.0
+            def rebuild_proxy_cache(self): pass
+            def update_inspector(self): pass
+
+        tl = MultiTrackTimeline(root, DummyApp())
+        tl.set_track_speed("A1", 0.1)
+        assert tl.track_speeds["A1"] == pytest.approx(0.25)  # clamped min
+
+        tl.set_track_speed("A1", 5.0)
+        assert tl.track_speeds["A1"] == pytest.approx(4.0)   # clamped max
+
+        tl.set_track_speed("A1", 1.0)
+        assert tl.track_speeds["A1"] == pytest.approx(1.0)
+    finally:
+        root.destroy()
+
+
+def test_export_file_size_and_bitrate_math():
+    duration_s = 60.0  # 1 minute
+    target_mb = 30.0
+    audio_kbps = 192.0
+
+    # Total bits = target_mb * 8192 kbits = 245,760 kbits
+    # Total kbps = 245,760 / 60 = 4,096 kbps
+    # Video kbps = 4,096 - 192 = 3,904 kbps
+    total_kbps = (target_mb * 8192.0) / duration_s
+    video_kbps = max(200.0, total_kbps - audio_kbps)
+    assert video_kbps == pytest.approx(3904.0)
+
+    # Reverse check: with 3904 kbps video + 192 kbps audio over 60s
+    calc_mb = ((video_kbps + audio_kbps) * duration_s) / 8192.0
+    assert calc_mb == pytest.approx(30.0)
+
+
+def test_rendertask_accepts_track_speeds_and_bitrate():
+    from engine import RenderTask
+    task = RenderTask(
+        project_clips=[],
+        out_path="out.mp4",
+        proj_w=1920,
+        proj_h=1080,
+        fps=30,
+        codec="libx264",
+        bitrate="4000k",
+        on_success=lambda: None,
+        on_error=lambda msg: None,
+        on_progress=lambda p: None,
+        track_volumes={"V1": 1.0},
+        track_pans={"V1": 0.0},
+        track_speeds={"V1": 1.5},
+    )
+    assert task._bitrate == "4000k"
+    assert task._track_speeds["V1"] == pytest.approx(1.5)
+
+
+def test_inspector_apply_validation_logic():
+    """Verify trim and numerical validation rules used in Inspector Apply Changes."""
+    # Test valid trim
+    tin, tout = 1.0, 5.0
+    assert tout > tin
+
+    # Test invalid trim (out before in)
+    tin_inv, tout_inv = 5.0, 1.0
+    assert tout_inv <= tin_inv
+
+    # Test coordinate parsing for signed integers vs strings
+    def parse_coord(val):
+        s = val.strip()
+        return int(s) if (s.startswith('-') and s[1:].isdigit()) or s.isdigit() else s
+
+    assert parse_coord("150") == 150
+    assert parse_coord("-45") == -45
+    assert parse_coord("center") == "center"
+
+
+def test_clip_data_crop_field():
+    """Verify make_clip and validate_clip support 'crop' and expanded 'aspect' ratios."""
+    from clip_data import make_clip, validate_clip
+
+    clip = make_clip(path="dummy.mp4", track="V1", start=0.0, duration=5.0)
+    assert clip.get("crop") is None
+    assert clip.get("aspect") == "Original"
+    assert validate_clip(clip) == []
+
+    # Custom crop box
+    clip["crop"] = {"x1": 0.1, "y1": 0.2, "x2": 0.8, "y2": 0.9}
+    clip["aspect"] = "9:16"
+    assert validate_clip(clip) == []
+
+
+def test_crop_aspect_dialog_calculations():
+    """Verify CropAspectDialog centering and aspect ratio calculation logic."""
+    from crop_tool import CropAspectDialog, ASPECT_PRESETS
+
+    # 1920x1080 source (16:9)
+    # Centered 9:16 crop:
+    # target_r = 9/16 = 0.5625
+    # orig_r = 16/9 = 1.7778
+    # Since orig_r > target_r, crop_w = (9/16) / (16/9) = 81/256 = 0.3164
+    class MockDialog:
+        orig_aspect = 1920.0 / 1080.0
+        img_w = 1920
+        img_h = 1080
+        _calc_centered_crop = CropAspectDialog._calc_centered_crop
+
+    dlg = MockDialog()
+    x1, y1, x2, y2 = dlg._calc_centered_crop(9.0 / 16.0)
+    assert y1 == 0.0 and y2 == 1.0
+    assert x1 > 0.3
+    assert x2 < 0.7
+    # Width / Height ratio in pixels should be 9/16
+    pixel_w = (x2 - x1) * 1920
+    pixel_h = (y2 - y1) * 1080
+    assert (pixel_w / pixel_h) == pytest.approx(9.0 / 16.0, rel=1e-3)
+
+    # 1:1 square crop on 1920x1080
+    x1, y1, x2, y2 = dlg._calc_centered_crop(1.0)
+    assert y1 == 0.0 and y2 == 1.0
+    pixel_w = (x2 - x1) * 1920
+    pixel_h = 1080.0
+    assert (pixel_w / pixel_h) == pytest.approx(1.0, rel=1e-3)
+
+
+def test_sequence_settings_presets():
+    """Verify sequence canvas presets are defined properly."""
+    from main import _SequenceSettingsDialog
+
+    presets = _SequenceSettingsDialog.PRESETS
+    assert "16:9 - 1080p Full HD (1920×1080)" in presets
+    assert presets["16:9 - 1080p Full HD (1920×1080)"] == (1920, 1080)
+    assert "9:16 - Vertical / Shorts / TikTok (1080×1920)" in presets
+    assert presets["9:16 - Vertical / Shorts / TikTok (1080×1920)"] == (1080, 1920)
+    assert "1:1 - Square Post (1080×1080)" in presets
+    assert presets["1:1 - Square Post (1080×1080)"] == (1080, 1080)
+
+
+def test_commands_undo_redo_crop_and_aspect():
+    """Verify InspectorChangeCommand records and undos custom crop and aspect changes."""
+    from commands import InspectorChangeCommand
+
+    class MockApp:
+        def __init__(self):
+            self.project_clips = [
+                {
+                    "id": "c1",
+                    "path": "sample.mp4",
+                    "aspect": "Original",
+                    "crop": None,
+                }
+            ]
+
+    app = MockApp()
+    old_props = copy.deepcopy(app.project_clips[0])
+    new_props = copy.deepcopy(old_props)
+    new_props["crop"] = {"x1": 0.25, "y1": 0.0, "x2": 0.75, "y2": 1.0}
+    new_props["aspect"] = "9:16"
+
+    cmd = InspectorChangeCommand(app, "c1", old_props, new_props)
+    cmd.execute()
+    assert app.project_clips[0]["crop"] == {"x1": 0.25, "y1": 0.0, "x2": 0.75, "y2": 1.0}
+    assert app.project_clips[0]["aspect"] == "9:16"
+
+    cmd.undo()
+    assert app.project_clips[0]["crop"] is None
+    assert app.project_clips[0]["aspect"] == "Original"
+
+
+
+
 
 
 

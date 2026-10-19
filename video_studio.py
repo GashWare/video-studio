@@ -366,9 +366,28 @@ class VideoStudioApp(ctk.CTk):
         ctk.set_appearance_mode(config_mgr.get("theme"))
         ctk.set_default_color_theme(config_mgr.get("accent_color"))
         
-        self.title("PyDev Video Studio NLE")
+        self.title("Video Studio")
         self.geometry("1400x900")
         self.minsize(1200, 800)
+
+        # Set Window and Taskbar Icon
+        _script_dir = os.path.dirname(os.path.abspath(__file__))
+        _icon_ico = os.path.join(_script_dir, "assets", "icon.ico")
+        _icon_png = os.path.join(_script_dir, "assets", "icon.png")
+        if os.path.exists(_icon_ico):
+            try:
+                self.iconbitmap(default=_icon_ico)
+            except Exception:
+                try:
+                    self.iconbitmap(_icon_ico)
+                except Exception:
+                    pass
+        if os.path.exists(_icon_png):
+            try:
+                self._app_icon_photo = ImageTk.PhotoImage(file=_icon_png)
+                self.wm_iconphoto(True, self._app_icon_photo)
+            except Exception:
+                pass
         
         # Project Data
         self.project_clips = [] # List of clip dictionaries
@@ -591,28 +610,98 @@ class VideoStudioApp(ctk.CTk):
         self.lbl_vol.configure(text=f"{clip.get('volume', 1.0):.1f}x")
         self.var_rmbg.set(clip.get('rm_bg', False))
 
+    def show_toast(self, message: str, success: bool = True, duration_ms: int = 2500):
+        """Display a slick, modern non-blocking HUD toast notification in the UI."""
+        try:
+            if hasattr(self, '_active_toast') and self._active_toast:
+                try:
+                    self._active_toast.destroy()
+                except Exception:
+                    pass
+                self._active_toast = None
+
+            bg_color = "#122a1c" if success else "#3a1313"
+            border_color = "#00e676" if success else "#ff5252"
+            text_color = "#d5fbe3" if success else "#ffd6d6"
+            icon = "✔" if success else "✖"
+
+            parent = getattr(self, 'tab_edit', self)
+            toast = ctk.CTkFrame(
+                parent,
+                fg_color=bg_color,
+                border_color=border_color,
+                border_width=2,
+                corner_radius=8
+            )
+            self._active_toast = toast
+
+            def _dismiss(event=None):
+                try:
+                    if getattr(self, '_active_toast', None) == toast:
+                        toast.destroy()
+                        self._active_toast = None
+                except Exception:
+                    pass
+
+            lbl = ctk.CTkLabel(
+                toast,
+                text=f"{icon}  {message}",
+                text_color=text_color,
+                font=("Segoe UI", 11, "bold"),
+                wraplength=280,
+                justify="center",
+                cursor="hand2"
+            )
+            lbl.pack(padx=16, pady=10)
+            lbl.bind("<Button-1>", _dismiss)
+            toast.bind("<Button-1>", _dismiss)
+
+            toast.place(relx=0.5, rely=0.93, anchor="center")
+            self.after(duration_ms, _dismiss)
+        except Exception:
+            pass
+
     def apply_inspector_changes(self):
         clip_id = self.timeline.active_clip_id
         clip = next((c for c in self.project_clips if c['id'] == clip_id), None)
-        if not clip: return
+        if not clip:
+            self.show_toast("Changes failed: No clip selected.", success=False)
+            messagebox.showwarning("No Clip Selected", "Please select a clip on the timeline first.")
+            return
         
         try:
-            clip['trim_in'] = float(self.var_trim_in.get())
-            clip['trim_out'] = float(self.var_trim_out.get())
-            clip['scale'] = self.var_scale.get()
+            tin_str = self.var_trim_in.get().strip()
+            tout_str = self.var_trim_out.get().strip()
+            tin = float(tin_str) if tin_str else 0.0
+            tout = float(tout_str) if tout_str else float(clip.get('trim_out', 0.0))
+            if tout <= tin:
+                self.show_toast("Changes failed: Out point must be after In point.", success=False)
+                messagebox.showerror("Invalid Trim", "Out point must be after In point.")
+                return
+
+            clip['trim_in'] = tin
+            clip['trim_out'] = tout
+            clip['scale'] = float(self.var_scale.get())
             
             x_val = self.var_x.get().strip()
             y_val = self.var_y.get().strip()
-            clip['x'] = int(x_val) if x_val.isdigit() else x_val
-            clip['y'] = int(y_val) if y_val.isdigit() else y_val
+            clip['x'] = int(x_val) if (x_val.startswith('-') and x_val[1:].isdigit()) or x_val.isdigit() else x_val
+            clip['y'] = int(y_val) if (y_val.startswith('-') and y_val[1:].isdigit()) or y_val.isdigit() else y_val
             
-            clip['volume'] = self.var_vol.get()
-            clip['rm_bg'] = self.var_rmbg.get()
+            clip['volume'] = float(self.var_vol.get())
+            clip['rm_bg'] = bool(self.var_rmbg.get())
             
             self.rebuild_proxy_cache()
             self.timeline.draw()
-        except ValueError:
-            messagebox.showerror("Error", "Invalid number format in properties.")
+            self.show_toast("Changes applied successfully!", success=True)
+            if hasattr(self, 'lbl_status'):
+                self.lbl_status.configure(text="Changes applied to clip.")
+        except ValueError as e:
+            self.show_toast(f"Changes failed to apply: {e}", success=False)
+            messagebox.showerror("Error", f"Invalid number format: {e}")
+        except Exception as e:
+            self.show_toast(f"Changes failed to apply: {e}", success=False)
+            messagebox.showerror("Error", f"Failed to apply changes: {e}")
 
     def delete_active_clip(self):
         clip_id = self.timeline.active_clip_id

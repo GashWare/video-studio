@@ -198,14 +198,14 @@ class _LabeledSlider(ctk.CTkFrame):
         self.fmt = fmt
         self._var = tk.DoubleVar(value=default)
 
-        ctk.CTkLabel(self, text=label, width=90, anchor="w").pack(side="left")
+        ctk.CTkLabel(self, text=label, width=95, anchor="w", font=("Segoe UI", 10, "bold")).pack(side="left")
         self._slider = ctk.CTkSlider(
             self, from_=from_, to=to, number_of_steps=number_of_steps,
-            variable=self._var, width=130,
+            variable=self._var, width=130, height=16,
             command=self._on_change,
         )
         self._slider.pack(side="left", padx=4)
-        self._val_lbl = ctk.CTkLabel(self, text=self._fmt_val(default), width=46)
+        self._val_lbl = ctk.CTkLabel(self, text=self._fmt_val(default), width=48, font=("Consolas", 10, "bold"))
         self._val_lbl.pack(side="left")
 
     def _fmt_val(self, v: float) -> str:
@@ -252,7 +252,7 @@ class ColorGradingPanel(ctk.CTkFrame):
         pad = {"padx": 6, "pady": 2}
 
         # ── Basic controls ──────────────────────────────────────────────
-        basic_lbl = ctk.CTkLabel(self, text="Basic", font=ctk.CTkFont(size=12, weight="bold"))
+        basic_lbl = ctk.CTkLabel(self, text="Basic", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
         basic_lbl.pack(anchor="w", **pad)
 
         self._brightness = self._make_slider("Brightness", -100, 100, 0)
@@ -261,28 +261,28 @@ class ColorGradingPanel(ctk.CTkFrame):
         self._hue        = self._make_slider("Hue Shift",  -180, 180, 0)
 
         # ── Lift (shadows) ──────────────────────────────────────────────
-        lift_lbl = ctk.CTkLabel(self, text="Lift (Shadows)", font=ctk.CTkFont(size=12, weight="bold"))
+        lift_lbl = ctk.CTkLabel(self, text="Lift (Shadows)", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
         lift_lbl.pack(anchor="w", **pad)
         self._lift_r = self._make_slider("Lift R", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._lift_g = self._make_slider("Lift G", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._lift_b = self._make_slider("Lift B", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
 
         # ── Gamma (midtones) ────────────────────────────────────────────
-        gamma_lbl = ctk.CTkLabel(self, text="Gamma (Midtones)", font=ctk.CTkFont(size=12, weight="bold"))
+        gamma_lbl = ctk.CTkLabel(self, text="Gamma (Midtones)", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
         gamma_lbl.pack(anchor="w", **pad)
         self._gamma_r = self._make_slider("Gamma R", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._gamma_g = self._make_slider("Gamma G", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._gamma_b = self._make_slider("Gamma B", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
 
         # ── Gain (highlights) ───────────────────────────────────────────
-        gain_lbl = ctk.CTkLabel(self, text="Gain (Highlights)", font=ctk.CTkFont(size=12, weight="bold"))
+        gain_lbl = ctk.CTkLabel(self, text="Gain (Highlights)", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
         gain_lbl.pack(anchor="w", **pad)
         self._gain_r = self._make_slider("Gain R", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._gain_g = self._make_slider("Gain G", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
         self._gain_b = self._make_slider("Gain B", 0.0, 2.0, 1.0, steps=200, fmt="{:.2f}")
 
         # ── Histogram ───────────────────────────────────────────────────
-        hist_lbl = ctk.CTkLabel(self, text="Histogram", font=ctk.CTkFont(size=12, weight="bold"))
+        hist_lbl = ctk.CTkLabel(self, text="Histogram", font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"))
         hist_lbl.pack(anchor="w", **pad)
         self._hist_canvas = tk.Canvas(self, width=180, height=60,
                                        bg="#1a1a1a", highlightthickness=1,
@@ -292,9 +292,9 @@ class ColorGradingPanel(ctk.CTkFrame):
         # ── LUT Presets ─────────────────────────────────────────────────
         lut_frame = ctk.CTkFrame(self, fg_color="transparent")
         lut_frame.pack(fill="x", padx=6, pady=2)
-        ctk.CTkLabel(lut_frame, text="LUT Preset", width=90, anchor="w").pack(side="left")
+        ctk.CTkLabel(lut_frame, text="LUT Preset", width=95, anchor="w", font=("Segoe UI", 10, "bold")).pack(side="left")
         self._lut_combo = ctk.CTkComboBox(
-            lut_frame, values=LUT_PRESET_NAMES, width=160,
+            lut_frame, values=LUT_PRESET_NAMES, width=160, height=30,
             command=self._on_change,
         )
         self._lut_combo.set("None")
@@ -302,7 +302,7 @@ class ColorGradingPanel(ctk.CTkFrame):
 
         # ── Reset button ─────────────────────────────────────────────────
         ctk.CTkButton(self, text="Reset All", command=self._reset_all,
-                      height=28).pack(padx=6, pady=6)
+                      height=32, font=("Segoe UI", 11, "bold")).pack(padx=6, pady=6)
 
     def _make_slider(self, label: str, from_: float, to: float, default: float,
                      steps: int = 200, fmt: str = "{:.0f}") -> _LabeledSlider:

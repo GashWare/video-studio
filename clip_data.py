@@ -35,6 +35,7 @@ class ClipData(TypedDict, total=False):
     x:            Any          # int pixels or "center"/"left"/"right"
     y:            Any          # int pixels or "center"/"top"/"bottom"
     aspect:       str          # "Original" | "16:9" | "9:16" | "1:1" | "4:3"
+    crop:         Optional[dict] # {"x1": float, "y1": float, "x2": float, "y2": float} (normalized 0.0-1.0)
     rot:          str          # "0°" | "90°" | "180°" | "270°"
 
     # Audio
@@ -111,6 +112,7 @@ def make_clip(path: str, track: str, start: float, duration: float, **overrides)
         'x':               'center',
         'y':               'center',
         'aspect':          'Original',
+        'crop':            None,
         'rot':             '0°',
         'volume':          1.0,
         'speed':           1.0,
@@ -147,8 +149,11 @@ def get_color(clip: ClipData) -> ColorGradingDict:
 
 
 def clip_duration(clip: ClipData) -> float:
-    """Return the effective clip duration in seconds (``trim_out - trim_in``)."""
-    return clip['trim_out'] - clip['trim_in']
+    """Return the effective clip duration in seconds (``(trim_out - trim_in) / speed``)."""
+    spd = float(clip.get('speed', 1.0) or 1.0)
+    if spd <= 0:
+        spd = 1.0
+    return (clip['trim_out'] - clip['trim_in']) / spd
 
 
 def clip_end_time(clip: ClipData) -> float:

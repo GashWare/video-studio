@@ -1,8 +1,25 @@
 {
-    "geometry": "1920x989+56+15",
+    "geometry": "1920x989+128+25",
     "theme": "Dark",
     "accent_color": "blue",
     "log_level": "INFO",
     "export_quality": 85,
-    "show_console": true
+    "show_console": true,
+    "transport_layout": {
+        "pod_order": [
+            "transport",
+            "timecode",
+            "vumeter",
+            "tools"
+        ],
+        "alignment": "space_between",
+        "vu_width": 340,
+        "show_headers": true,
+        "visible_pods": {
+            "transport": true,
+            "timecode": true,
+            "vumeter": true,
+            "tools": true
+        }
+    }
 }

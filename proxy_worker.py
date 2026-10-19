@@ -22,6 +22,7 @@ from moviepy.editor import (
     VideoFileClip,
 )
 import moviepy.audio.fx.all as afx
+import moviepy.video.fx.all as vfx
 from engine import apply_audio_pan
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,7 @@ class ProxyWorker(threading.Thread):
         track_pans: Optional[dict] = None,
         track_muted: Optional[dict] = None,
         track_solo: Optional[dict] = None,
+        track_speeds: Optional[dict] = None,
     ) -> None:
         """
         Schedule a new proxy build. Cancels the current one if running.
@@ -87,12 +89,13 @@ class ProxyWorker(threading.Thread):
         t_pans = dict(track_pans) if track_pans else {}
         t_mute = dict(track_muted) if track_muted else {}
         t_solo = dict(track_solo) if track_solo else {}
+        t_spds = dict(track_speeds) if track_speeds else {}
 
         with self._condition:
             self._cancel.set()
             self._pending = (
                 clips_copy, proxy_w, proxy_h, proj_w, proj_h, app, on_done,
-                t_vols, t_pans, t_mute, t_solo
+                t_vols, t_pans, t_mute, t_solo, t_spds
             )
             self._condition.notify()
 
@@ -107,13 +110,19 @@ class ProxyWorker(threading.Thread):
         track_pans: dict,
         track_muted: dict,
         track_solo: dict,
+        track_speeds: dict,
     ) -> Tuple:
         """
         Perform the MoviePy composite build across all video and audio tracks.
         """
-        max_dur = max(
-            c["start"] + (c["trim_out"] - c["trim_in"]) for c in clips
-        )
+        def get_eff_dur(c):
+            trk = c.get("track", "V1")
+            eff_spd = float(c.get("speed", 1.0) or 1.0) * float(track_speeds.get(trk, 1.0))
+            if eff_spd <= 0:
+                eff_spd = 1.0
+            return max(0.01, (float(c.get("trim_out", 3.0)) - float(c.get("trim_in", 0.0))) / eff_spd)
+
+        max_dur = max(c["start"] + get_eff_dur(c) for c in clips)
         max_dur = max(max_dur, 1.0)
 
         v_layers: list = [
@@ -149,7 +158,10 @@ class ProxyWorker(threading.Thread):
             path = d.get("path", "")
             trim_in = float(d.get("trim_in", 0.0))
             trim_out = float(d.get("trim_out", 3.0))
-            duration = max(0.01, trim_out - trim_in)
+            eff_spd = float(d.get("speed", 1.0) or 1.0) * float(track_speeds.get(trk, 1.0))
+            if eff_spd <= 0:
+                eff_spd = 1.0
+            duration = max(0.01, (trim_out - trim_in) / eff_spd)
 
             try:
                 if path == "__title__" or "title_config" in d or "title_text" in d:
@@ -185,7 +197,49 @@ class ProxyWorker(threading.Thread):
                         .subclip(trim_in, trim_out)
                         .resize(height=proxy_h)
                     )
+                    if eff_spd != 1.0:
+                        clip = clip.fx(vfx.speedx, eff_spd)
                     open_clips.append(clip)
+
+                # Custom Crop Box (normalized 0.0 - 1.0: x1, y1, x2, y2)
+                crop_box = d.get('crop')
+                if crop_box and isinstance(crop_box, dict):
+                    cw, ch = clip.size
+                    cx1 = int(round(float(crop_box.get('x1', 0.0)) * cw))
+                    cy1 = int(round(float(crop_box.get('y1', 0.0)) * ch))
+                    cx2 = int(round(float(crop_box.get('x2', 1.0)) * cw))
+                    cy2 = int(round(float(crop_box.get('y2', 1.0)) * ch))
+                    cx1 = max(0, min(cx1, cw - 2))
+                    cy1 = max(0, min(cy1, ch - 2))
+                    cx2 = max(cx1 + 2, min(cx2, cw))
+                    cy2 = max(cy1 + 2, min(cy2, ch))
+                    clip = clip.crop(x1=cx1, y1=cy1, x2=cx2, y2=cy2)
+
+                # Aspect ratio crop
+                aspect = d.get('aspect', 'Original')
+                if aspect and aspect != 'Original':
+                    cw, ch = clip.size
+                    ratio_map = {
+                        '16:9': 16/9, '9:16': 9/16, '1:1': 1.0, '4:3': 4/3,
+                        '21:9': 21/9, '4:5': 4/5, '2:3': 2/3
+                    }
+                    tr = ratio_map.get(aspect, cw / ch)
+                    cr = cw / ch
+                    if cr > tr + 0.005:
+                        new_w = max(2, int(round(ch * tr)))
+                        clip = clip.crop(x1=(cw - new_w) // 2, y1=0, width=new_w, height=ch)
+                    elif cr < tr - 0.005:
+                        new_h = max(2, int(round(cw / tr)))
+                        clip = clip.crop(x1=0, y1=(ch - new_h) // 2, width=cw, height=new_h)
+
+                # Rotation
+                rot_str = d.get('rot', '0°')
+                if rot_str and rot_str != '0°':
+                    try:
+                        angle = int(rot_str.replace('°', ''))
+                        clip = clip.fx(vfx.rotate, angle)
+                    except Exception:
+                        pass
 
                 if d.get("scale", 1.0) != 1.0:
                     clip = clip.resize(d["scale"])
@@ -244,8 +298,14 @@ class ProxyWorker(threading.Thread):
             if eff_vol == 0:
                 continue
 
+            eff_spd = float(d.get("speed", 1.0) or 1.0) * float(track_speeds.get(trk, 1.0))
+            if eff_spd <= 0:
+                eff_spd = 1.0
+
             try:
                 a = AudioFileClip(d["path"]).subclip(d["trim_in"], d["trim_out"])
+                if eff_spd != 1.0:
+                    a = a.fx(vfx.speedx, eff_spd)
                 open_clips.append(a)
                 if eff_vol != 1.0:
                     a = a.fx(afx.volumex, eff_vol)
@@ -285,7 +345,7 @@ class ProxyWorker(threading.Thread):
 
             (
                 clips, proxy_w, proxy_h, proj_w, proj_h, app, on_done,
-                t_vols, t_pans, t_mute, t_solo
+                t_vols, t_pans, t_mute, t_solo, t_spds
             ) = work
             self._cancel.clear()
 
@@ -296,7 +356,7 @@ class ProxyWorker(threading.Thread):
             try:
                 master, open_clips = self._build(
                     clips, proxy_w, proxy_h, proj_w, proj_h,
-                    t_vols, t_pans, t_mute, t_solo
+                    t_vols, t_pans, t_mute, t_solo, t_spds
                 )
             except Exception as exc:
                 log.exception("Proxy build failed: %s", exc)
@@ -377,6 +437,12 @@ class FrameQueue:
                         elif data.shape[1] == 1:
                             data = np.repeat(data, 2, axis=1)
                         outdata[:] = data.astype(np.float32)
+
+                        # Real-time volume level metering for UI VU meter
+                        if app is not None and hasattr(app, "vu_meter") and app.vu_meter:
+                            pk_l = float(np.max(np.abs(data[:, 0]))) if len(data) > 0 else 0.0
+                            pk_r = float(np.max(np.abs(data[:, 1]))) if len(data) > 0 else 0.0
+                            app.after_idle(lambda l=pk_l, r=pk_r: app.vu_meter.set_levels(l, r) if getattr(app, "vu_meter", None) else None)
                     except Exception:
                         outdata.fill(0)
                     t_audio[0] = t1

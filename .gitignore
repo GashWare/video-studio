@@ -23,6 +23,10 @@ crash_reports/
 test_audio_temp.wav
 test_img_temp.png
 
+# Debug and temporary UI inspection artifacts
+assets/*_debug.png
+assets/preview_frame.png
+
 # Environment and OS files
 .env
 .DS_Store

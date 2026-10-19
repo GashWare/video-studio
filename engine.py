@@ -166,18 +166,35 @@ def process_clip_data(c_data, cancel_flag):
     else:
         c = VideoFileClip(path).subclip(trim_in, trim_out)
 
+    # Custom Crop Box (normalized 0.0 - 1.0 coords: x1, y1, x2, y2)
+    crop_box = c_data.get('crop')
+    if crop_box and isinstance(crop_box, dict):
+        w, h = c.size
+        cx1 = int(round(float(crop_box.get('x1', 0.0)) * w))
+        cy1 = int(round(float(crop_box.get('y1', 0.0)) * h))
+        cx2 = int(round(float(crop_box.get('x2', 1.0)) * w))
+        cy2 = int(round(float(crop_box.get('y2', 1.0)) * h))
+        cx1 = max(0, min(cx1, w - 2))
+        cy1 = max(0, min(cy1, h - 2))
+        cx2 = max(cx1 + 2, min(cx2, w))
+        cy2 = max(cy1 + 2, min(cy2, h))
+        c = c.crop(x1=cx1, y1=cy1, x2=cx2, y2=cy2)
+
     # Aspect ratio crop
     aspect = c_data.get('aspect', 'Original')
-    if aspect != 'Original':
+    if aspect and aspect != 'Original':
         w, h = c.size
-        ratio_map = {'16:9': 16/9, '9:16': 9/16, '1:1': 1.0, '4:3': 4/3}
+        ratio_map = {
+            '16:9': 16/9, '9:16': 9/16, '1:1': 1.0, '4:3': 4/3,
+            '21:9': 21/9, '4:5': 4/5, '2:3': 2/3
+        }
         tr  = ratio_map.get(aspect, w / h)
         cr  = w / h
-        if cr > tr + 0.01:
-            new_w = int(h * tr)
+        if cr > tr + 0.005:
+            new_w = max(2, int(round(h * tr)))
             c = c.crop(x1=(w - new_w) // 2, y1=0, width=new_w, height=h)
-        elif cr < tr - 0.01:
-            new_h = int(w / tr)
+        elif cr < tr - 0.005:
+            new_h = max(2, int(round(w / tr)))
             c = c.crop(x1=0, y1=(h - new_h) // 2, width=w, height=new_h)
 
     # Scale
@@ -191,8 +208,11 @@ def process_clip_data(c_data, cancel_flag):
         c = c.fx(vfx.rotate, angle)
 
     # Speed
-    if c_data.get('speed', 1.0) != 1.0:
-        c = c.fx(vfx.speedx, c_data['speed'])
+    eff_speed = float(c_data.get('speed', 1.0) or 1.0) * float(c_data.get('track_speed', 1.0) or 1.0)
+    if eff_speed <= 0:
+        eff_speed = 1.0
+    if eff_speed != 1.0:
+        c = c.fx(vfx.speedx, eff_speed)
 
     # Audio
     if c_data.get('mute_audio', False) and c.audio:
@@ -446,7 +466,7 @@ class RenderTask(VideoTask):
                  proj_w, proj_h, fps, codec, bitrate,
                  on_success, on_error, on_progress,
                  track_volumes=None, track_pans=None,
-                 track_audio_effects=None):
+                 track_audio_effects=None, track_speeds=None):
         super().__init__(on_success, on_error, on_progress)
         self._clips               = [copy.deepcopy(c) for c in project_clips]
         self._out                 = out_path
@@ -458,14 +478,19 @@ class RenderTask(VideoTask):
         self._track_volumes       = track_volumes or {}
         self._track_pans          = track_pans or {}
         self._track_audio_effects = track_audio_effects or {}
+        self._track_speeds        = track_speeds or {}
 
     def run(self):
         open_clips = []
         try:
-            max_dur = max(
-                c['start'] + (c['trim_out'] - c['trim_in'])
-                for c in self._clips
-            )
+            def get_eff_dur(c):
+                trk = c.get('track', 'V1')
+                eff_spd = float(c.get('speed', 1.0) or 1.0) * float(self._track_speeds.get(trk, 1.0))
+                if eff_spd <= 0:
+                    eff_spd = 1.0
+                return max(0.01, (float(c.get('trim_out', 3.0)) - float(c.get('trim_in', 0.0))) / eff_spd)
+
+            max_dur = max([c['start'] + get_eff_dur(c) for c in self._clips] or [1.0])
             max_dur = max(max_dur, 1.0)
 
             # ── Visual layers (Video, Image, Titles/Subtitles) ───────
@@ -486,6 +511,7 @@ class RenderTask(VideoTask):
             for d in v_data:
                 if self._cancel_flag.is_set():
                     return
+                d['track_speed'] = self._track_speeds.get(d.get('track', 'V1'), 1.0)
                 clip = process_clip_data(d, self._cancel_flag)
                 open_clips.append(clip)
 
@@ -508,7 +534,14 @@ class RenderTask(VideoTask):
             for d in [c for c in self._clips if c.get('track', '').startswith('A')]:
                 if self._cancel_flag.is_set():
                     return
+                eff_spd = float(d.get('speed', 1.0) or 1.0) * float(self._track_speeds.get(d.get('track', 'A1'), 1.0))
+                if eff_spd <= 0:
+                    eff_spd = 1.0
+
                 a = AudioFileClip(d['path']).subclip(d['trim_in'], d['trim_out'])
+                if eff_spd != 1.0:
+                    a = a.fx(vfx.speedx, eff_spd)
+
                 t_vol = self._track_volumes.get(d['track'], 1.0)
                 t_pan = self._track_pans.get(d['track'], 0.0)
                 clip_vol = d.get('volume', 1.0)
